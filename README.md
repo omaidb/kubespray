@@ -1,228 +1,172 @@
-# Deploy a Production Ready Kubernetes Cluster
+# 原理
+kubespray 是利用 ansible 这个工具，通过 SSH 协议批量让指定远程机器执行一系列脚本，安装各种组件，完成 K8S 集群搭建。
 
-![Kubernetes Logo](https://raw.githubusercontent.com/kubernetes-sigs/kubespray/master/docs/img/kubernetes-logo.png)
+准备工作
+下载 kubespray 并拷贝一份配置:
+```shell
+# 下载 kubespray
+git clone --depth=1 https://github.com/kubernetes-sigs/kubespray.git
+cd kubespray
 
-If you have questions, check the documentation at [kubespray.io](https://kubespray.io) and join us on the [kubernetes slack](https://kubernetes.slack.com), channel **\#kubespray**.
-You can get your invite [here](http://slack.k8s.io/)
+# 安装依赖，包括 ansible
+sudo pip3 install -r requirements.txt
 
-- Can be deployed on **[AWS](docs/cloud_providers/aws.md), GCE, [Azure](docs/cloud_providers/azure.md), [OpenStack](docs/cloud_controllers/openstack.md), [vSphere](docs/cloud_controllers/vsphere.md), [Equinix Metal](docs/cloud_providers/equinix-metal.md) (bare metal), Oracle Cloud Infrastructure (Experimental), or Baremetal**
-- **Highly available** cluster
-- **Composable** (Choice of the network plugin for instance)
-- Supports most popular **Linux distributions**
-- **Continuous integration tests**
-
-## Quick Start
-
-Below are several ways to use Kubespray to deploy a Kubernetes cluster.
-
-### Docker
-
-Ensure you have installed Docker then
-
-```ShellSession
-docker run --rm -it --mount type=bind,source="$(pwd)"/inventory/sample,dst=/inventory \
-  --mount type=bind,source="${HOME}"/.ssh/id_rsa,dst=/root/.ssh/id_rsa \
-  quay.io/kubespray/kubespray:v2.29.0 bash
-# Inside the container you may now run the kubespray playbooks:
-ansible-playbook -i /inventory/inventory.ini --private-key /root/.ssh/id_rsa cluster.yml
+# 复制一份配置文件
+cp -rfp inventory/sample inventory/mycluster
 ```
 
-### Ansible
 
-#### Usage
 
-See [Getting started](/docs/getting_started/getting-started.md)
 
-#### Collection
 
-See [here](docs/ansible/ansible_collection.md) if you wish to use this repository as an Ansible collection
+# 修改配置
+需要修改的配置文件列表:
 
-### Vagrant
+inventory/mycluster/group_vars/all/*.yml
+inventory/mycluster/group_vars/k8s-cluster/*.yml
+下面介绍一些需要重点关注的配置，根据自己需求进行修改。
 
-For Vagrant we need to install Python dependencies for provisioning tasks.
-Check that ``Python`` and ``pip`` are installed:
+# 集群网络
+修改配置文件 inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml:
+```shell
+# 选择网络插件，支持 cilium, calico, weave 和 flannel
+kube_network_plugin: cilium
 
-```ShellSession
-python -V && pip -V
+# 设置 Service 网段
+kube_service_addresses: 10.233.0.0/18
+
+# 设置 Pod 网段
+kube_pods_subnet: 10.233.64.0/18
+```
+其它相关配置文件: inventory/mycluster/group_vars/k8s_cluster/k8s-net-*.yml。
+
+# 运行时
+修改配置文件 inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml:
+```shell
+# 支持 docker, crio 和 containerd，推荐 containerd.
+container_manager: containerd
+
+# 是否开启 kata containers
+kata_containers_enabled: false
+```
+其它相关配置文件:
+
+inventory/mycluster/group_vars/all/containerd.yml
+inventory/mycluster/group_vars/all/cri-o.yml
+inventory/mycluster/group_vars/all/docker.yml
+
+# 集群证书
+修改配置文件 inventory/mycluster/group_vars/k8s_cluster/k8s-cluster.yml:
+```shell
+# 是否开启自动更新证书，推荐开启。
+auto_renew_certificates: true
 ```
 
-If this returns the version of the software, you're good to go. If not, download and install Python from here <https://www.python.org/downloads/source/>
+# 准备机器列表
+拿到集群部署的初始机器内网 ip 列表，修改 inventory/mycluster/inventory.ini:
+```yaml
+[all]
+master1 ansible_host=10.10.10.1
+master2 ansible_host=10.10.10.2
+master3 ansible_host=10.10.10.3
+node1 ansible_host=10.10.10.4
+node2 ansible_host=10.10.10.5
+node3 ansible_host=10.10.10.6
+node4 ansible_host=10.10.10.7
+node5 ansible_host=10.10.10.8
+node6 ansible_host=10.10.10.9
+node7 ansible_host=10.10.10.10
 
-Install Ansible according to [Ansible installation guide](/docs/ansible/ansible.md#installing-ansible)
-then run the following step:
+[kube_control_plane]
+master1
+master2
+master3
 
-```ShellSession
-vagrant up
+[etcd]
+master1
+master2
+master3
+
+[kube_node]
+master1
+master2
+master3
+node1
+node2
+node3
+node4
+node5
+node6
+node7
+
+[calico_rr]
+
+[k8s_cluster:children]
+kube_control_plane
+kube_node
+calico_rr
+```
+>注: 务必使用 ansible_host 标识节点内网 IP，否则可能导致出现类似 这个issue 的问题。
+
+附上 vim 编辑 inventory，批量加机器的技巧:
+
+
+
+# 国内环境安装
+在国内进行安装时，会因 GFW 影响而安装失败，参考 kubespray 离线安装配置。
+
+# 部署集群
+```shell
+ansible-playbook \
+  -i inventory/mycluster/inventory.ini \
+  --private-key=id_rsa \
+  --user=ubuntu -b \
+  cluster.yml
+```
+# 获取 kubeconfig
+部署完成后，从 master 节点上的 /root/.kube/config 路径获取到 kubeconfig，这里以 ansible 的 fetch 功能为例，将 kubeconfig 拷贝下来:
+
+```shell
+ansible -i '10.10.6.9,' -b -m fetch --private-key id_rsa --user=ubuntu -a 'src=/root/.kube/config dest=kubeconfig flat=yes' all
+[WARNING]: Skipping callback plugin 'ara_default', unable to load
+10.10.6.9 | CHANGED => {
+    "changed": true,
+    "checksum": "190eafeead70a8677b736eaa66d84d77c4a7f8be",
+    "dest": "/root/kubespray/kubeconfig",
+    "md5sum": "ded532f68930c48a53b3b2144b30f7f5",
+    "remote_checksum": "190eafeead70a8677b736eaa66d84d77c4a7f8be",
+    "remote_md5sum": null
+}
 ```
 
-## Documents
+-i 中的逗号是故意的，意思是不让 ansible 误以为是个 inventory 文件，而是解析为单个 host。
 
-- [Requirements](#requirements)
-- [Kubespray vs ...](docs/getting_started/comparisons.md)
-- [Getting started](docs/getting_started/getting-started.md)
-- [Setting up your first cluster](docs/getting_started/setting-up-your-first-cluster.md)
-- [Ansible inventory and tags](docs/ansible/ansible.md)
-- [Integration with existing ansible repo](docs/operations/integration.md)
-- [Deployment data variables](docs/ansible/vars.md)
-- [DNS stack](docs/advanced/dns-stack.md)
-- [HA mode](docs/operations/ha-mode.md)
-- [Network plugins](#network-plugins)
-- [Vagrant install](docs/developers/vagrant.md)
-- [Flatcar Container Linux bootstrap](docs/operating_systems/flatcar.md)
-- [Fedora CoreOS bootstrap](docs/operating_systems/fcos.md)
-- [openSUSE setup](docs/operating_systems/opensuse.md)
-- [Downloaded artifacts](docs/advanced/downloads.md)
-- [Equinix Metal](docs/cloud_providers/equinix-metal.md)
-- [OpenStack](docs/cloud_controllers/openstack.md)
-- [vSphere](docs/cloud_controllers/vsphere.md)
-- [Large deployments](docs/operations/large-deployments.md)
-- [Adding/replacing a node](docs/operations/nodes.md)
-- [Upgrades basics](docs/operations/upgrades.md)
-- [Air-Gap installation](docs/operations/offline-environment.md)
-- [NTP](docs/advanced/ntp.md)
-- [Hardening](docs/operations/hardening.md)
-- [Mirror](docs/operations/mirror.md)
-- [Roadmap](docs/roadmap/roadmap.md)
+获取到 kubeconfig 后，可以修改其中的 server 地址，将 https://127.0.0.1:6443 改为非 master 节点可以访问的地址，最简单就直接替换 127.0.0.1 成其中一台 master 节点的 IP 地址，也可以在 Master 前面挂个负载均衡器，然后替换成负载均衡器的地址。
 
-## Supported Linux Distributions
+# 扩容节点
+如果要扩容节点，可以准备好节点的内网 IP 列表，并追加到之前的 inventory 文件里，然后再次使用 ansible-playbook 运行一次，有点不同的是: cluster.yml 换成 scale.yml:
+```shell
+ansible-playbook \
+  -i inventory/mycluster/inventory.ini \
+  --private-key=id_rsa \
+  --user=ubuntu -b \
+  scale.yml
+```
 
-- **Flatcar Container Linux by Kinvolk**
-- **Debian** Bookworm, Bullseye, Trixie
-- **Ubuntu** 22.04, 24.04
-- **CentOS Stream / RHEL** [9, 10](docs/operating_systems/rhel.md#rhel-8)
-- **Fedora** 39, 40
-- **Fedora CoreOS** (see [fcos Note](docs/operating_systems/fcos.md))
-- **openSUSE** Leap 15.x/Tumbleweed
-- **Oracle Linux** [9, 10](docs/operating_systems/rhel.md#rhel-8)
-- **Alma Linux** [9, 10](docs/operating_systems/rhel.md#rhel-8)
-- **Rocky Linux** [9, 10](docs/operating_systems/rhel.md#rhel-8) (experimental in 10: see [Rocky Linux 10 notes](docs/operating_systems/rhel.md#rocky-linux-10))
-- **Kylin Linux Advanced Server V10** (experimental: see [kylin linux notes](docs/operating_systems/kylinlinux.md))
-- **Amazon Linux 2** (experimental: see [amazon linux notes](docs/operating_systems/amazonlinux.md))
-- **UOS Linux** (experimental: see [uos linux notes](docs/operating_systems/uoslinux.md))
-- **openEuler** (experimental: see [openEuler notes](docs/operating_systems/openeuler.md))
+# 缩容节点
+如果有节点不再需要了，我们可以将其移除集群，通常步骤是:
 
-Note:
-
-- Upstart/SysV init based OS types are not supported.
-- [Kernel requirements](docs/operations/kernel-requirements.md) (please read if the OS kernel version is < 4.19).
-
-## Supported Components
-
-<!-- BEGIN ANSIBLE MANAGED BLOCK -->
-
-- Core
-  - [kubernetes](https://github.com/kubernetes/kubernetes) 1.34.3
-  - [etcd](https://github.com/etcd-io/etcd) 3.5.26
-  - [docker](https://www.docker.com/) 28.3
-  - [containerd](https://containerd.io/) 2.1.6
-  - [cri-o](http://cri-o.io/) 1.34.3 (experimental: see [CRI-O Note](docs/CRI/cri-o.md). Only on fedora, ubuntu and centos based OS)
-- Network Plugin
-  - [cni-plugins](https://github.com/containernetworking/plugins) 1.8.0
-  - [calico](https://github.com/projectcalico/calico) 3.30.5
-  - [cilium](https://github.com/cilium/cilium) 1.18.5
-  - [flannel](https://github.com/flannel-io/flannel) 0.27.3
-  - [kube-ovn](https://github.com/alauda/kube-ovn) 1.12.21
-  - [kube-router](https://github.com/cloudnativelabs/kube-router) 2.1.1
-  - [multus](https://github.com/k8snetworkplumbingwg/multus-cni) 4.2.2
-  - [kube-vip](https://github.com/kube-vip/kube-vip) 1.0.3
-- Application
-  - [cert-manager](https://github.com/jetstack/cert-manager) 1.15.3
-  - [coredns](https://github.com/coredns/coredns) 1.12.1
-  - [ingress-nginx](https://github.com/kubernetes/ingress-nginx) 1.13.3
-  - [argocd](https://argoproj.github.io/) 2.14.5
-  - [helm](https://helm.sh/) 3.18.4
-  - [metallb](https://metallb.universe.tf/) 0.13.9
-  - [registry](https://github.com/distribution/distribution) 2.8.1
-- Storage Plugin
-  - [aws-ebs-csi-plugin](https://github.com/kubernetes-sigs/aws-ebs-csi-driver) 0.5.0
-  - [azure-csi-plugin](https://github.com/kubernetes-sigs/azuredisk-csi-driver) 1.10.0
-  - [cinder-csi-plugin](https://github.com/kubernetes/cloud-provider-openstack/blob/master/docs/cinder-csi-plugin/using-cinder-csi-plugin.md) 1.30.0
-  - [gcp-pd-csi-plugin](https://github.com/kubernetes-sigs/gcp-compute-persistent-disk-csi-driver) 1.9.2
-  - [local-path-provisioner](https://github.com/rancher/local-path-provisioner) 0.0.32
-  - [local-volume-provisioner](https://github.com/kubernetes-sigs/sig-storage-local-static-provisioner) 2.5.0
-  - [node-feature-discovery](https://github.com/kubernetes-sigs/node-feature-discovery) 0.16.4
-
-<!-- END ANSIBLE MANAGED BLOCK -->
-
-## Container Runtime Notes
-
-- The cri-o version should be aligned with the respective kubernetes version (i.e. kube_version=1.20.x, crio_version=1.20)
-
-## Requirements
-
-- **Minimum required version of Kubernetes is v1.30**
-- **Ansible v2.14+, Jinja 2.11+ and python-netaddr is installed on the machine that will run Ansible commands**
-- The target servers must have **access to the Internet** in order to pull docker images. Otherwise, additional configuration is required (See [Offline Environment](docs/operations/offline-environment.md))
-- The target servers are configured to allow **IPv4 forwarding**.
-- If using IPv6 for pods and services, the target servers are configured to allow **IPv6 forwarding**.
-- The **firewalls are not managed**, you'll need to implement your own rules the way you used to.
-    in order to avoid any issue during deployment you should disable your firewall.
-- If kubespray is run from non-root user account, correct privilege escalation method
-    should be configured in the target servers. Then the `ansible_become` flag
-    or command parameters `--become or -b` should be specified.
-
-Hardware:
-These limits are safeguarded by Kubespray. Actual requirements for your workload can differ. For a sizing guide go to the [Building Large Clusters](https://kubernetes.io/docs/setup/cluster-large/#size-of-master-and-master-components) guide.
-
-- Control Plane
-  - Memory: 2 GB
-- Worker Node
-  - Memory: 1 GB
-
-## Network Plugins
-
-You can choose among ten network plugins. (default: `calico`, except Vagrant uses `flannel`)
-
-- [flannel](docs/CNI/flannel.md): gre/vxlan (layer 2) networking.
-
-- [Calico](https://docs.tigera.io/calico/latest/about/) is a networking and network policy provider. Calico supports a flexible set of networking options
-    designed to give you the most efficient networking across a range of situations, including non-overlay
-    and overlay networks, with or without BGP. Calico uses the same engine to enforce network policy for hosts,
-    pods, and (if using Istio and Envoy) applications at the service mesh layer.
-
-- [cilium](http://docs.cilium.io/en/latest/): layer 3/4 networking (as well as layer 7 to protect and secure application protocols), supports dynamic insertion of BPF bytecode into the Linux kernel to implement security services, networking and visibility logic.
-
-- [kube-ovn](docs/CNI/kube-ovn.md): Kube-OVN integrates the OVN-based Network Virtualization with Kubernetes. It offers an advanced Container Network Fabric for Enterprises.
-
-- [kube-router](docs/CNI/kube-router.md): Kube-router is a L3 CNI for Kubernetes networking aiming to provide operational
-    simplicity and high performance: it uses IPVS to provide Kube Services Proxy (if setup to replace kube-proxy),
-    iptables for network policies, and BGP for ods L3 networking (with optionally BGP peering with out-of-cluster BGP peers).
-    It can also optionally advertise routes to Kubernetes cluster Pods CIDRs, ClusterIPs, ExternalIPs and LoadBalancerIPs.
-
-- [macvlan](docs/CNI/macvlan.md): Macvlan is a Linux network driver. Pods have their own unique Mac and Ip address, connected directly the physical (layer 2) network.
-
-- [multus](docs/CNI/multus.md): Multus is a meta CNI plugin that provides multiple network interface support to pods. For each interface Multus delegates CNI calls to secondary CNI plugins such as Calico, macvlan, etc.
-
-- [custom_cni](roles/network-plugin/custom_cni/) : You can specify some manifests that will be applied to the clusters to bring you own CNI and use non-supported ones by Kubespray.
-  See `tests/files/custom_cni/README.md` and `tests/files/custom_cni/values.yaml`for an example with a CNI provided by a Helm Chart.
-
-The network plugin to use is defined by the variable `kube_network_plugin`. There is also an
-option to leverage built-in cloud provider networking instead.
-See also [Network checker](docs/advanced/netcheck.md).
-
-## Ingress Plugins
-
-- [nginx](https://kubernetes.github.io/ingress-nginx): the NGINX Ingress Controller.
-
-- [metallb](docs/ingress/metallb.md): the MetalLB bare-metal service LoadBalancer provider.
-
-## Community docs and resources
-
-- [kubernetes.io/docs/setup/production-environment/tools/kubespray/](https://kubernetes.io/docs/setup/production-environment/tools/kubespray/)
-- [kubespray, monitoring and logging](https://github.com/gregbkr/kubernetes-kargo-logging-monitoring) by @gregbkr
-- [Deploy Kubernetes w/ Ansible & Terraform](https://rsmitty.github.io/Terraform-Ansible-Kubernetes/) by @rsmitty
-- [Deploy a Kubernetes Cluster with Kubespray (video)](https://www.youtube.com/watch?v=CJ5G4GpqDy0)
-
-## Tools and projects on top of Kubespray
-
-- [Digital Rebar Provision](https://github.com/digitalrebar/provision/blob/v4/doc/integrations/ansible.rst)
-- [Terraform Contrib](https://github.com/kubernetes-sigs/kubespray/tree/master/contrib/terraform)
-- [Kubean](https://github.com/kubean-io/kubean)
-
-## CI Tests
-
-[![Build graphs](https://gitlab.com/kargo-ci/kubernetes-sigs-kubespray/badges/master/pipeline.svg)](https://gitlab.com/kargo-ci/kubernetes-sigs-kubespray/-/pipelines)
-
-CI/end-to-end tests sponsored by: [CNCF](https://cncf.io), [Equinix Metal](https://metal.equinix.com/), [OVHcloud](https://www.ovhcloud.com/), [ELASTX](https://elastx.se/).
-
-See the [test matrix](docs/developers/test_cases.md) for details.
+kubectl cordon NODE 驱逐节点，确保节点上的服务飘到其它节点上去，参考 安全维护或下线节点。
+停止节点上的一些 k8s 组件 (kubelet, kube-proxy) 等。
+kubectl delete NODE 将节点移出集群。
+如果节点是虚拟机，并且不需要了，可以直接销毁掉。
+前 3 个步骤，也可以用 kubespray 提供的 remove-node.yml 这个 playbook 来一步到位实现:
+```shell
+ansible-playbook \
+  -i inventory/mycluster/inventory.ini \
+  --private-key=id_rsa \
+  --user=ubuntu -b \
+  --extra-vars "node=node1,node2" \
+  remove-node.yml
+```
+--extra-vars 里写要移出的节点名列表，如果节点已经卡死，无法通过 SSH 登录，可以在 --extra-vars 加个 reset_nodes=false 的选项，跳过第二个步骤。
